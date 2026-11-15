@@ -43,8 +43,16 @@ local function findNearestPlayerRoot(fromPosition)
 	return nearestRoot
 end
 
+-- Forward declaration: armTouchDamage shoves an enemy away, and the
+-- mover is defined just below it.
+local moveEnemyParts
+
 -- Wire one part so touching a player hurts them, once per cooldown.
-local function armTouchDamage(part, onPlayerHurt)
+-- After a hit the enemy is shoved 25 studs away from the player: the
+-- old code left the enemy sitting on the player, so Touched fired
+-- again the moment the 2-second cooldown ended and hearts drained
+-- one per 2 seconds with no way out.
+local function armTouchDamage(part, onPlayerHurt, enemy)
 	part.Touched:Connect(function(hit)
 		if GameState.snapshot().phase ~= "Playing" then
 			return
@@ -60,21 +68,39 @@ local function armTouchDamage(part, onPlayerHurt)
 		if not GameState.canHurtPlayer(player) then
 			return
 		end
+		local root = hit.Parent:FindFirstChild("HumanoidRootPart")
+		if root ~= nil and enemy ~= nil then
+			local away = enemy.centre - root.Position
+			away = Vector3.new(away.X, 0, away.Z)
+			if away.Magnitude < 1 then
+				away = Vector3.new(math.random(-1, 1), 0, 1)
+			end
+			enemy.centre = Vector3.new(
+				math.clamp(root.Position.X + away.Unit.X * 25, -GameConfig.MEADOW_HALF_SIZE, GameConfig.MEADOW_HALF_SIZE),
+				enemy.centre.Y,
+				math.clamp(root.Position.Z + away.Unit.Z * 25, -GameConfig.MEADOW_HALF_SIZE, GameConfig.MEADOW_HALF_SIZE)
+			)
+			moveEnemyParts(enemy, enemy.centre)
+		end
 		onPlayerHurt(player)
 	end)
 end
 
 -- Move one enemy part and its riders together to a new centre.
-local function moveEnemyParts(enemy, centre)
+moveEnemyParts = function(enemy, centre)
 	for _, piece in ipairs(enemy.pieces) do
 		piece.part.CFrame = CFrame.new(centre + piece.offset)
 	end
 end
 
 -- One enemy's chase loop: step towards the nearest player, wobbling for bees.
+-- It only chases inside the chase range; farther away it wanders slowly,
+-- so enemies no longer converge on the player from across the meadow.
 local function runEnemyLoop(enemy, token)
 	task.spawn(function()
 		local wobble = 0
+		local wanderAngle = math.random() * math.pi * 2
+		local wanderClock = 0
 		while enemy.alive and token == waveToken do
 			local snapshot = GameState.snapshot()
 			if snapshot.phase ~= "Playing" then
@@ -82,11 +108,13 @@ local function runEnemyLoop(enemy, token)
 				continue
 			end
 			local root = findNearestPlayerRoot(enemy.centre)
+			local chased = false
 			if root ~= nil then
 				local toPlayer = root.Position - enemy.centre
 				toPlayer = Vector3.new(toPlayer.X, 0, toPlayer.Z)
 				local distance = toPlayer.Magnitude
-				if distance > 1 then
+				if distance <= GameConfig.ENEMY_CHASE_RANGE_STUDS and distance > 1 then
+					chased = true
 					local step = toPlayer.Unit * enemy.speed * 0.2
 					if enemy.kind == "Bee" then
 						wobble += 0.9
@@ -94,41 +122,58 @@ local function runEnemyLoop(enemy, token)
 						step += side * math.sin(wobble) * 1.6
 					end
 					enemy.centre += Vector3.new(step.X, 0, step.Z)
-					enemy.centre = Vector3.new(
-						math.clamp(enemy.centre.X, -GameConfig.MEADOW_HALF_SIZE, GameConfig.MEADOW_HALF_SIZE),
-						enemy.centre.Y,
-						math.clamp(enemy.centre.Z, -GameConfig.MEADOW_HALF_SIZE, GameConfig.MEADOW_HALF_SIZE)
-					)
-					moveEnemyParts(enemy, enemy.centre)
 				end
 			end
+			if not chased then
+				wanderClock += 0.2
+				if wanderClock >= 2 then
+					wanderClock = 0
+					wanderAngle = math.random() * math.pi * 2
+				end
+				local drift = Vector3.new(math.cos(wanderAngle), 0, math.sin(wanderAngle))
+				enemy.centre += drift * enemy.speed * 0.25 * 0.2
+			end
+			enemy.centre = Vector3.new(
+				math.clamp(enemy.centre.X, -GameConfig.MEADOW_HALF_SIZE, GameConfig.MEADOW_HALF_SIZE),
+				enemy.centre.Y,
+				math.clamp(enemy.centre.Z, -GameConfig.MEADOW_HALF_SIZE, GameConfig.MEADOW_HALF_SIZE)
+			)
+			moveEnemyParts(enemy, enemy.centre)
 			task.wait(0.2)
 		end
 	end)
 end
 
--- A Thorn Slime: a dark green ball with a purple thorn on top.
+-- A Thorn Slime: a big bright lime ball with a purple thorn on top.
+-- The old 3.5-stud dark green ball blended into the grass; this one
+-- is larger, lighter and glowing, so it reads as an enemy at a glance.
 local function spawnThornSlime(position, speed, onPlayerHurt, token)
 	local body = Instance.new("Part")
 	body.Name = "ThornSlime"
 	body.Shape = Enum.PartType.Ball
-	body.Size = Vector3.new(3.5, 3.5, 3.5)
-	body.Color = Color3.fromRGB(46, 125, 50)
-	body.Material = Enum.Material.SmoothPlastic
+	body.Size = Vector3.new(5, 5, 5)
+	body.Color = Color3.fromRGB(80, 200, 60)
+	body.Material = Enum.Material.Neon
 	body.Anchored = true
 	body.CanCollide = false
 	body.Position = position
 	body.Parent = getEnemiesFolder()
 
+	local slimeGlow = Instance.new("PointLight")
+	slimeGlow.Color = Color3.fromRGB(80, 200, 60)
+	slimeGlow.Range = 8
+	slimeGlow.Brightness = 1
+	slimeGlow.Parent = body
+
 	local thorn = Instance.new("Part")
 	thorn.Name = "Thorn"
 	thorn.Shape = Enum.PartType.Ball
-	thorn.Size = Vector3.new(1.4, 1.4, 1.4)
-	thorn.Color = Color3.fromRGB(120, 60, 180)
+	thorn.Size = Vector3.new(2, 2, 2)
+	thorn.Color = Color3.fromRGB(160, 60, 220)
 	thorn.Material = Enum.Material.Neon
 	thorn.Anchored = true
 	thorn.CanCollide = false
-	thorn.Position = position + Vector3.new(0, 2, 0)
+	thorn.Position = position + Vector3.new(0, 2.8, 0)
 	thorn.Parent = getEnemiesFolder()
 
 	local enemy = {
@@ -138,21 +183,21 @@ local function spawnThornSlime(position, speed, onPlayerHurt, token)
 		alive = true,
 		pieces = {
 			{ part = body, offset = Vector3.new(0, 0, 0) },
-			{ part = thorn, offset = Vector3.new(0, 2, 0) },
+			{ part = thorn, offset = Vector3.new(0, 2.8, 0) },
 		},
 	}
-	armTouchDamage(body, onPlayerHurt)
+	armTouchDamage(body, onPlayerHurt, enemy)
 	table.insert(activeEnemies, enemy)
 	runEnemyLoop(enemy, token)
 	return enemy
 end
 
--- A Dart Bee: a yellow ball with a black stripe and white wings.
+-- A Dart Bee: a bigger yellow ball with a black stripe and white wings.
 local function spawnDartBee(position, speed, onPlayerHurt, token)
 	local body = Instance.new("Part")
 	body.Name = "DartBee"
 	body.Shape = Enum.PartType.Ball
-	body.Size = Vector3.new(2.6, 2.6, 2.6)
+	body.Size = Vector3.new(3.6, 3.6, 3.6)
 	body.Color = Color3.fromRGB(255, 210, 30)
 	body.Material = Enum.Material.Neon
 	body.Anchored = true
@@ -160,10 +205,16 @@ local function spawnDartBee(position, speed, onPlayerHurt, token)
 	body.Position = position
 	body.Parent = getEnemiesFolder()
 
+	local beeGlow = Instance.new("PointLight")
+	beeGlow.Color = Color3.fromRGB(255, 210, 30)
+	beeGlow.Range = 7
+	beeGlow.Brightness = 1
+	beeGlow.Parent = body
+
 	local stripe = Instance.new("Part")
 	stripe.Name = "BeeStripe"
 	stripe.Shape = Enum.PartType.Ball
-	stripe.Size = Vector3.new(2.7, 1, 2.7)
+	stripe.Size = Vector3.new(3.7, 1.2, 3.7)
 	stripe.Color = Color3.fromRGB(30, 30, 30)
 	stripe.Material = Enum.Material.SmoothPlastic
 	stripe.Anchored = true
@@ -173,13 +224,13 @@ local function spawnDartBee(position, speed, onPlayerHurt, token)
 
 	local wing = Instance.new("Part")
 	wing.Name = "BeeWing"
-	wing.Size = Vector3.new(2.4, 0.2, 1.4)
+	wing.Size = Vector3.new(3.2, 0.2, 1.8)
 	wing.Color = Color3.fromRGB(255, 255, 255)
 	wing.Material = Enum.Material.SmoothPlastic
 	wing.Transparency = 0.3
 	wing.Anchored = true
 	wing.CanCollide = false
-	wing.Position = position + Vector3.new(0, 1.6, 0)
+	wing.Position = position + Vector3.new(0, 2, 0)
 	wing.Parent = getEnemiesFolder()
 
 	local enemy = {
@@ -190,23 +241,35 @@ local function spawnDartBee(position, speed, onPlayerHurt, token)
 		pieces = {
 			{ part = body, offset = Vector3.new(0, 0, 0) },
 			{ part = stripe, offset = Vector3.new(0, 0, 0) },
-			{ part = wing, offset = Vector3.new(0, 1.6, 0) },
+			{ part = wing, offset = Vector3.new(0, 2, 0) },
 		},
 	}
-	armTouchDamage(body, onPlayerHurt)
+	armTouchDamage(body, onPlayerHurt, enemy)
 	table.insert(activeEnemies, enemy)
 	runEnemyLoop(enemy, token)
 	return enemy
 end
 
--- A random spot on the meadow floor, away from the spawn corner.
+-- A random spot on the meadow floor, away from the spawn corner and
+-- away from every player: the old code spawned anywhere, so an enemy
+-- could start on top of the player before they had moved at all.
 local function randomMeadowSpot(height)
 	local half = GameConfig.MEADOW_HALF_SIZE
-	return Vector3.new(
-		math.random(-half, half),
-		height,
-		math.random(-half, half)
-	)
+	local safe = GameConfig.SPAWN_SAFE_RADIUS_STUDS
+	local spot = Vector3.new(0, height, 0)
+	for _ = 1, 20 do
+		spot = Vector3.new(math.random(-half, half), height, math.random(-half, half))
+		local fromSpawn = Vector3.new(spot.X, 0, spot.Z + 60).Magnitude
+		local nearestRoot = findNearestPlayerRoot(spot)
+		local fromPlayer = math.huge
+		if nearestRoot ~= nil then
+			fromPlayer = (nearestRoot.Position - spot).Magnitude
+		end
+		if fromSpawn >= safe and fromPlayer >= 18 then
+			break
+		end
+	end
+	return spot
 end
 
 -- Clear every enemy and stop their chase loops.
@@ -224,12 +287,15 @@ function EnemySpawner.clearEnemies()
 end
 
 -- Fill the meadow with the enemies this level calls for.
+-- The first slime always starts in front of the spawn pad, 24 studs
+-- out: visible in the first play screenshot, but never on the player.
 function EnemySpawner.startWave(level, onPlayerHurt)
 	EnemySpawner.clearEnemies()
 	local token = waveToken
 	local settings = GameConfig.LEVELS[level]
-	for _ = 1, settings.slimeCount do
-		spawnThornSlime(randomMeadowSpot(2), settings.slimeSpeed, onPlayerHurt, token)
+	spawnThornSlime(Vector3.new(16, 2.5, -36), settings.slimeSpeed, onPlayerHurt, token)
+	for _ = 2, settings.slimeCount do
+		spawnThornSlime(randomMeadowSpot(2.5), settings.slimeSpeed, onPlayerHurt, token)
 	end
 	for _ = 1, settings.beeCount do
 		spawnDartBee(randomMeadowSpot(3), settings.beeSpeed, onPlayerHurt, token)

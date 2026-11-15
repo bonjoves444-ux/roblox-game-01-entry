@@ -127,31 +127,63 @@ local function awardBloomPoints(player, bloom, kind)
 	end
 end
 
+-- A random spot on the meadow floor, never near the spawn pad, so a
+-- bloom never grows where the player cannot see it or an enemy never
+-- starts on top of them. Retries a few times, then takes the last try.
+local function randomSafeSpot(height)
+	local half = GameConfig.MEADOW_HALF_SIZE
+	local safe = GameConfig.SPAWN_SAFE_RADIUS_STUDS
+	local spot = Vector3.new(0, height, 0)
+	for _ = 1, 20 do
+		spot = Vector3.new(math.random(-half, half), height, math.random(-half, half))
+		local fromSpawn = Vector3.new(spot.X, 0, spot.Z + 60).Magnitude
+		if fromSpawn >= safe then
+			break
+		end
+	end
+	return spot
+end
+
 -- Grow one bloom: a glowing Sunbloom, or a bigger pink Rainbow Bloom.
-function spawnBloom(kind)
+-- Big, neon and bobbing, so it reads from across the meadow; the old
+-- 2.4-stud balls sat still at ankle height and vanished in the grass.
+function spawnBloom(kind, position)
 	local isRainbow = kind == "RainbowBloom"
 	local bloom = Instance.new("Part")
 	bloom.Name = kind
 	bloom.Shape = Enum.PartType.Ball
 	if isRainbow then
-		bloom.Size = Vector3.new(3.4, 3.4, 3.4)
+		bloom.Size = Vector3.new(GameConfig.RAINBOW_SIZE, GameConfig.RAINBOW_SIZE, GameConfig.RAINBOW_SIZE)
 		bloom.Color = Color3.fromRGB(255, 80, 200)
 	else
-		bloom.Size = Vector3.new(2.4, 2.4, 2.4)
+		bloom.Size = Vector3.new(GameConfig.SUNBLOOM_SIZE, GameConfig.SUNBLOOM_SIZE, GameConfig.SUNBLOOM_SIZE)
 		bloom.Color = Color3.fromRGB(255, 200, 40)
 	end
 	bloom.Material = Enum.Material.Neon
 	bloom.Anchored = true
 	bloom.CanCollide = false
-	local half = GameConfig.MEADOW_HALF_SIZE
-	bloom.Position = Vector3.new(math.random(-half, half), 2, math.random(-half, half))
+	bloom.Position = position or randomSafeSpot(GameConfig.BLOOM_HEIGHT)
 	bloom.Parent = getBloomsFolder()
 
 	local glow = Instance.new("PointLight")
 	glow.Color = bloom.Color
-	glow.Range = 7
-	glow.Brightness = 1
+	glow.Range = 10
+	glow.Brightness = 1.5
 	glow.Parent = bloom
+
+	-- Bob up and down so a bloom catches the eye even standing still.
+	local baseY = bloom.Position.Y
+	local phase = math.random() * math.pi * 2
+	task.spawn(function()
+		while bloom.Parent ~= nil do
+			task.wait(0.15)
+			if bloom.Parent == nil then
+				return
+			end
+			local t = os.clock()
+			bloom.Position = Vector3.new(bloom.Position.X, baseY + math.sin(t * 2 + phase) * 0.6, bloom.Position.Z)
+		end
+	end)
 
 	bloom.Touched:Connect(function(hit)
 		if GameState.snapshot().phase ~= "Playing" then
@@ -171,13 +203,26 @@ function spawnBloom(kind)
 end
 
 -- Fill the meadow with a fresh wave of blooms for the current level.
+-- Four Sunblooms always grow in a fan right in front of the spawn pad,
+-- so the first thing the player sees is colour, not empty grass; the
+-- rest scatter over the meadow at a safe distance from the spawn.
 function spawnBloomWave()
 	local folder = Workspace:FindFirstChild("SunbloomBlooms")
 	if folder ~= nil then
 		folder:Destroy()
 	end
 	bloomsFolder = nil
-	for _ = 1, GameConfig.ALIVE_SUNBLOOMS do
+	local height = GameConfig.BLOOM_HEIGHT
+	local nearSpawn = {
+		Vector3.new(-14, height, -42),
+		Vector3.new(10, height, -44),
+		Vector3.new(-6, height, -30),
+		Vector3.new(18, height, -34),
+	}
+	for _, spot in ipairs(nearSpawn) do
+		spawnBloom("Sunbloom", spot)
+	end
+	for _ = 1, GameConfig.ALIVE_SUNBLOOMS - #nearSpawn do
 		spawnBloom("Sunbloom")
 	end
 	for _ = 1, GameConfig.ALIVE_RAINBOWS do
